@@ -3,92 +3,94 @@ import type { ChatSession } from "../domain/chatTypes";
 const SESSION_PREFIX = "kakao-chat-viewer:session:";
 const INDEX_KEY = "kakao-chat-viewer:session-index";
 const DB_NAME = "kakao-chat-viewer";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const AVATAR_STORE = "avatar-thumbnails";
+const SESSION_STORE = "chat-sessions";
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
-export function saveSession(session: ChatSession): void {
-  cleanupExpiredSessions();
-  sessionStorage.setItem(`${SESSION_PREFIX}${session.id}`, JSON.stringify(session));
-  const index = loadSessionIndex();
-
-  if (!index.includes(session.id)) {
-    sessionStorage.setItem(INDEX_KEY, JSON.stringify([session.id, ...index]));
-  }
+export async function saveSession(session: ChatSession): Promise<void> {
+  await cleanupExpiredSessions();
+  const db = await openDb();
+  await requestToPromise(db.transaction(SESSION_STORE, "readwrite").objectStore(SESSION_STORE).put(session, session.id));
+  db.close();
 }
 
-export function loadSession(sessionId: string): ChatSession | null {
+export async function loadSession(sessionId: string): Promise<ChatSession | null> {
   const raw = sessionStorage.getItem(`${SESSION_PREFIX}${sessionId}`);
 
-  if (!raw) {
-    return null;
-  }
-
-  try {
-    const session = JSON.parse(raw) as ChatSession;
-
-    if (isExpired(session)) {
-      removeSession(sessionId);
-      return null;
-    }
-
-    return session;
-  } catch {
-    removeSession(sessionId);
-    return null;
-  }
-}
-
-export function loadSessionIndex(): string[] {
-  const raw = sessionStorage.getItem(INDEX_KEY);
-
-  if (!raw) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-export function cleanupExpiredSessions(): void {
-  for (const sessionId of loadSessionIndex()) {
-    const raw = sessionStorage.getItem(`${SESSION_PREFIX}${sessionId}`);
-
-    if (!raw) {
-      removeSession(sessionId);
-      continue;
-    }
-
+  if (raw) {
     try {
       const session = JSON.parse(raw) as ChatSession;
 
       if (isExpired(session)) {
-        removeSession(sessionId);
+        await removeSession(sessionId);
+        return null;
       }
+
+      await saveSession(session);
+      sessionStorage.removeItem(`${SESSION_PREFIX}${sessionId}`);
+      return session;
     } catch {
-      removeSession(sessionId);
+      sessionStorage.removeItem(`${SESSION_PREFIX}${sessionId}`);
+    }
+  }
+
+  const db = await openDb();
+  const session = await requestToPromise<ChatSession | undefined>(
+    db.transaction(SESSION_STORE, "readonly").objectStore(SESSION_STORE).get(sessionId)
+  );
+  db.close();
+
+  if (!session) {
+    return null;
+  }
+
+  if (isExpired(session)) {
+    await removeSession(sessionId);
+    return null;
+  }
+
+  return session;
+}
+
+export async function cleanupExpiredSessions(): Promise<void> {
+  const db = await openDb();
+  const sessions = await requestToPromise<ChatSession[]>(
+    db.transaction(SESSION_STORE, "readonly").objectStore(SESSION_STORE).getAll()
+  );
+  const expiredSessionIds = sessions.filter(isExpired).map((session) => session.id);
+
+  if (expiredSessionIds.length > 0) {
+    const transaction = db.transaction(SESSION_STORE, "readwrite");
+    await Promise.all(
+      expiredSessionIds.map((sessionId) => requestToPromise(transaction.objectStore(SESSION_STORE).delete(sessionId)))
+    );
+  }
+
+  db.close();
+
+  for (const key of Object.keys(sessionStorage)) {
+    if (key.startsWith(SESSION_PREFIX) || key === INDEX_KEY) {
+      sessionStorage.removeItem(key);
     }
   }
 }
 
-export function clearAllLocalChatData(): void {
+export async function clearAllLocalChatData(): Promise<void> {
   for (const key of Object.keys(sessionStorage)) {
     if (key.startsWith(SESSION_PREFIX) || key === INDEX_KEY) {
       sessionStorage.removeItem(key);
     }
   }
 
-  void clearAvatarThumbnails();
+  await clearObjectStores([SESSION_STORE, AVATAR_STORE]);
 }
 
-export function removeSession(sessionId: string): void {
+export async function removeSession(sessionId: string): Promise<void> {
   sessionStorage.removeItem(`${SESSION_PREFIX}${sessionId}`);
-  const nextIndex = loadSessionIndex().filter((id) => id !== sessionId);
-  sessionStorage.setItem(INDEX_KEY, JSON.stringify(nextIndex));
+  const db = await openDb();
+  await requestToPromise(db.transaction(SESSION_STORE, "readwrite").objectStore(SESSION_STORE).delete(sessionId));
+  db.close();
 }
 
 export async function saveAvatarThumbnail(blob: Blob): Promise<string> {
@@ -135,9 +137,11 @@ export async function createThumbnailBlob(file: File, size = 160): Promise<Blob>
   }
 }
 
-async function clearAvatarThumbnails(): Promise<void> {
+async function clearObjectStores(storeNames: string[]): Promise<void> {
   const db = await openDb();
-  await requestToPromise(db.transaction(AVATAR_STORE, "readwrite").objectStore(AVATAR_STORE).clear());
+  const transaction = db.transaction(storeNames, "readwrite");
+
+  await Promise.all(storeNames.map((storeName) => requestToPromise(transaction.objectStore(storeName).clear())));
   db.close();
 }
 
@@ -160,6 +164,10 @@ function openDb(): Promise<IDBDatabase> {
 
       if (!db.objectStoreNames.contains(AVATAR_STORE)) {
         db.createObjectStore(AVATAR_STORE);
+      }
+
+      if (!db.objectStoreNames.contains(SESSION_STORE)) {
+        db.createObjectStore(SESSION_STORE);
       }
     };
 

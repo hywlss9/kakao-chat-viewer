@@ -363,6 +363,12 @@ a {
   font-size: 15px;
 }
 
+.avatar-spacer {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 1px;
+}
+
 .avatar-md {
   width: 44px;
   height: 44px;
@@ -456,6 +462,10 @@ a {
   padding-bottom: 8px;
 }
 
+.virtual-row-compact {
+  padding-bottom: 4px;
+}
+
 .date-divider {
   width: fit-content;
   max-width: 92%;
@@ -472,7 +482,11 @@ a {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  margin: 0 0 8px;
+  margin: 0;
+}
+
+.message-row-compact {
+  margin: 0;
 }
 
 .message-row-me {
@@ -489,6 +503,17 @@ a {
 
 .message-row-me .message-stack {
   align-items: flex-end;
+}
+
+.message-line {
+  max-width: 100%;
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.message-line-me {
+  justify-content: flex-end;
 }
 
 .sender-name {
@@ -520,10 +545,13 @@ a {
   background: #fee500;
 }
 
-.message-stack time {
+.message-time {
+  flex: 0 0 auto;
   color: rgba(37, 52, 69, 0.72);
   font-size: 10px;
   font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 2px;
 }
 
 .special-content {

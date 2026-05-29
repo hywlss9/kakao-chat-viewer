@@ -87,21 +87,27 @@ export function UploadPage() {
     }
   }
 
-  function clearLocalData() {
-    clearAllLocalChatData();
+  async function clearLocalData() {
+    await clearAllLocalChatData();
     setDraftSession(null);
     setError(null);
     setStatus("idle");
   }
 
-  function completeSetup() {
+  async function completeSetup() {
     if (!draftSession || !canComplete) {
       return;
     }
 
     setStatus("saving");
-    saveSession(draftSession);
-    navigate(`/viewer/${draftSession.id}`);
+
+    try {
+      await saveSession(draftSession);
+      navigate(`/viewer/${draftSession.id}`);
+    } catch {
+      setError("대화 내용을 브라우저 저장소에 저장하지 못했습니다. 파일 크기를 줄인 뒤 다시 시도해주세요.");
+      setStatus("ready");
+    }
   }
 
   return (
@@ -142,7 +148,7 @@ export function UploadPage() {
             {status === "parsing" ? "해석 중" : "파일 선택"}
           </button>
           {error ? <p className="error-text">{error}</p> : null}
-          <button className="ghost-button" type="button" onClick={clearLocalData}>
+          <button className="ghost-button" type="button" onClick={() => void clearLocalData()}>
             <Trash2 size={16} /> 로컬 데이터 삭제
           </button>
         </section>
@@ -223,10 +229,10 @@ export function UploadPage() {
 
           <footer className="bottom-action">
             {error ? <p className="bottom-error">{error}</p> : null}
-            <button className="primary-button" type="button" disabled={!canComplete} onClick={completeSetup}>
+            <button className="primary-button" type="button" disabled={!canComplete} onClick={() => void completeSetup()}>
               <Check size={18} /> 완료
             </button>
-            <button className="ghost-button compact" type="button" onClick={clearLocalData}>
+            <button className="ghost-button compact" type="button" onClick={() => void clearLocalData()}>
               <Trash2 size={15} /> 로컬 데이터 삭제
             </button>
           </footer>
