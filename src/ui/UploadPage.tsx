@@ -13,10 +13,12 @@ import {
 } from "../storage/chatSessionStore";
 import { AvatarView } from "./AvatarView";
 
+const participantNameCollator = new Intl.Collator("ko-KR", { numeric: true, sensitivity: "base" });
+
 export function UploadPage() {
   const navigate = useNavigate();
   const [draftSession, setDraftSession] = useState<ChatSession | null>(null);
-  const [status, setStatus] = useState<"idle" | "parsing" | "ready" | "saving">("idle");
+  const [status, setStatus] = useState<"idle" | "parsing" | "ready" | "saving" | "clearing">("idle");
   const [parseProgress, setParseProgress] = useState<ParseProgress | null>(null);
   const [activeFileName, setActiveFileName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +32,10 @@ export function UploadPage() {
     const hasMe = draftSession.participants.filter((participant) => participant.isMe).length === 1;
     return hasMe && draftSession.participants.every((participant) => participant.displayName.trim().length > 0);
   }, [draftSession]);
+  const sortedParticipants = useMemo(
+    () => [...(draftSession?.participants ?? [])].sort(compareParticipantsByDisplayName),
+    [draftSession?.participants]
+  );
 
   async function handleFile(file: File) {
     setError(null);
@@ -94,12 +100,25 @@ export function UploadPage() {
   }
 
   async function clearLocalData() {
-    await clearAllLocalChatData();
-    setDraftSession(null);
+    if (status === "clearing") {
+      return;
+    }
+
+    const statusOnError = draftSession ? "ready" : "idle";
+
     setError(null);
-    setActiveFileName("");
-    setParseProgress(null);
-    setStatus("idle");
+    setStatus("clearing");
+
+    try {
+      await clearAllLocalChatData();
+      setDraftSession(null);
+      setActiveFileName("");
+      setParseProgress(null);
+      setStatus("idle");
+    } catch {
+      setError("로컬 데이터를 삭제하지 못했습니다. 브라우저 저장소 권한을 확인한 뒤 다시 시도해주세요.");
+      setStatus(statusOnError);
+    }
   }
 
   async function completeSetup() {
@@ -131,6 +150,8 @@ export function UploadPage() {
         <section className="upload-panel">
           {status === "parsing" ? (
             <LoadingPanel fileName={activeFileName} progress={parseProgress} />
+          ) : status === "clearing" ? (
+            <ClearingPanel />
           ) : (
             <>
               <FileUp aria-hidden="true" size={40} />
@@ -155,15 +176,16 @@ export function UploadPage() {
           <button
             className="primary-button"
             type="button"
-            disabled={status === "parsing"}
+            disabled={status === "parsing" || status === "clearing"}
             onClick={() => fileInputRef.current?.click()}
           >
             {status === "parsing" ? <Loader2 className="spin" size={18} /> : <FileUp size={18} />}
             {status === "parsing" ? "해석 중" : "파일 선택"}
           </button>
           {error ? <p className="error-text">{error}</p> : null}
-          <button className="ghost-button" type="button" onClick={() => void clearLocalData()}>
-            <Trash2 size={16} /> 로컬 데이터 삭제
+          <button className="ghost-button" type="button" disabled={status === "clearing"} onClick={() => void clearLocalData()}>
+            {status === "clearing" ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+            {status === "clearing" ? "삭제 중" : "로컬 데이터 삭제"}
           </button>
         </section>
       ) : (
@@ -184,7 +206,7 @@ export function UploadPage() {
           ) : null}
 
           <div className="participant-list">
-            {draftSession.participants.map((participant) => (
+            {sortedParticipants.map((participant) => (
               <article className="participant-row" key={participant.id}>
                 <AvatarView profile={participant} size="lg" />
                 <div className="participant-fields">
@@ -244,22 +266,31 @@ export function UploadPage() {
           <footer className="bottom-action">
             {error ? <p className="bottom-error">{error}</p> : null}
             {status === "saving" ? <SavingPanel /> : null}
+            {status === "clearing" ? <ClearingPanel compact /> : null}
             <button
               className="primary-button"
               type="button"
-              disabled={!canComplete || status === "saving"}
+              disabled={!canComplete || status === "saving" || status === "clearing"}
               onClick={() => void completeSetup()}
             >
               {status === "saving" ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
               {status === "saving" ? "저장 중" : "완료"}
             </button>
-            <button className="ghost-button compact" type="button" onClick={() => void clearLocalData()}>
-              <Trash2 size={15} /> 로컬 데이터 삭제
+            <button className="ghost-button compact" type="button" disabled={status === "clearing"} onClick={() => void clearLocalData()}>
+              {status === "clearing" ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />}
+              {status === "clearing" ? "삭제 중" : "로컬 데이터 삭제"}
             </button>
           </footer>
         </section>
       )}
     </div>
+  );
+}
+
+function compareParticipantsByDisplayName(left: ParticipantProfile, right: ParticipantProfile): number {
+  return participantNameCollator.compare(
+    left.displayName.trim() || left.originalName,
+    right.displayName.trim() || right.originalName
   );
 }
 
@@ -278,6 +309,22 @@ function LoadingPanel({ fileName, progress }: { fileName: string; progress: Pars
       <span className="progress-label">
         {isReading ? `${percent}% · ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}` : "대화 형식을 정리하고 있습니다"}
       </span>
+    </div>
+  );
+}
+
+function ClearingPanel({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={compact ? "saving-panel" : "loading-panel"} aria-live="polite" role="status">
+      <Loader2 className="spin" size={compact ? 16 : 42} />
+      {compact ? (
+        "로컬 데이터를 삭제하는 중입니다."
+      ) : (
+        <>
+          <h2>로컬 데이터를 삭제하는 중입니다</h2>
+          <p>브라우저에 저장된 대화와 프로필 썸네일을 정리하고 있습니다.</p>
+        </>
+      )}
     </div>
   );
 }

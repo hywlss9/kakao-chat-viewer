@@ -494,6 +494,24 @@ a {
   font-weight: 800;
 }
 
+.viewer-status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 12px;
+  background: rgba(255, 255, 255, 0.64);
+  color: #253445;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.viewer-status-error {
+  background: rgba(255, 240, 240, 0.82);
+  color: #9f1f1f;
+}
+
 .message-list {
   flex: 1 1 auto;
   overflow: auto;

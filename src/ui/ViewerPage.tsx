@@ -1,4 +1,4 @@
-import { ArrowLeft, CalendarDays, FileText, Image, MessageCircle, Search, Smile, Trash2 } from "lucide-react";
+import { ArrowLeft, CalendarDays, FileText, Image, Loader2, MessageCircle, Search, Smile, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { UIEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -21,6 +21,8 @@ export function ViewerPage() {
   const navigate = useNavigate();
   const [session, setSession] = useState<ChatSession | null>(null);
   const [loadingSession, setLoadingSession] = useState(true);
+  const [clearingLocalData, setClearingLocalData] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [activeDateIndex, setActiveDateIndex] = useState<number | null>(null);
   const [windowStart, setWindowStart] = useState(0);
   const parentRef = useRef<HTMLDivElement | null>(null);
@@ -269,15 +271,34 @@ export function ViewerPage() {
         <button
           aria-label="로컬 데이터 삭제"
           className="icon-button"
+          disabled={clearingLocalData}
           type="button"
-          onClick={() => {
-            void clearAllLocalChatData();
-            navigate("/upload", { replace: true });
+          onClick={async () => {
+            if (clearingLocalData) {
+              return;
+            }
+
+            setClearingLocalData(true);
+            setClearError(null);
+
+            try {
+              await clearAllLocalChatData();
+              navigate("/upload", { replace: true });
+            } catch {
+              setClearError("로컬 데이터를 삭제하지 못했습니다.");
+              setClearingLocalData(false);
+            }
           }}
         >
-          <Trash2 size={18} />
+          {clearingLocalData ? <Loader2 className="spin" size={18} /> : <Trash2 size={18} />}
         </button>
       </header>
+      {clearingLocalData || clearError ? (
+        <div className={clearError ? "viewer-status viewer-status-error" : "viewer-status"} aria-live="polite" role="status">
+          {clearError ? null : <Loader2 className="spin" size={15} />}
+          {clearError ?? "로컬 데이터를 삭제하는 중입니다."}
+        </div>
+      ) : null}
 
       <div className="date-jump">
         <CalendarDays size={16} />
