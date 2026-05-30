@@ -1,5 +1,6 @@
 import { ArrowLeft, CalendarDays, FileText, Image, MessageCircle, Search, Smile, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { UIEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { ChatMessage, ChatSession, ParticipantProfile } from "../domain/chatTypes";
@@ -11,7 +12,9 @@ type TimelineItem =
   | { type: "date"; id: string; timestampMs: number }
   | { type: "cluster"; id: string; participantId: string; timestampMs: number; messages: ChatMessage[] };
 
-const MAX_ESTIMATED_SCROLL_HEIGHT = 28_000_000;
+const VIRTUAL_WINDOW_SIZE = 12_000;
+const VIRTUAL_WINDOW_SHIFT_SIZE = 4_000;
+const VIRTUAL_WINDOW_EDGE_PX = 900;
 
 export function ViewerPage() {
   const { sessionId = "" } = useParams();
@@ -19,31 +22,40 @@ export function ViewerPage() {
   const [session, setSession] = useState<ChatSession | null>(null);
   const [loadingSession, setLoadingSession] = useState(true);
   const [activeDateIndex, setActiveDateIndex] = useState<number | null>(null);
+  const [windowStart, setWindowStart] = useState(0);
   const parentRef = useRef<HTMLDivElement | null>(null);
   const didScrollToLatestRef = useRef(false);
   const activeDateFrameRef = useRef(0);
-  const timeline = useMemo(() => (session ? buildTimeline(session.messages) : []), [session]);
-  const dateOptions = useMemo(() => buildDateOptions(timeline), [timeline]);
-  const estimatedRowSize = useMemo(() => getEstimatedRowSize(timeline.length), [timeline.length]);
+  const pendingScrollIndexRef = useRef<number | null>(null);
+  const pendingScrollTopRef = useRef<number | null>(null);
+  const shiftingWindowRef = useRef(false);
+  const autoScrollingToLatestRef = useRef(false);
+  const fullTimeline = useMemo(() => (session ? buildTimeline(session.messages) : []), [session]);
+  const visibleTimeline = useMemo(
+    () => fullTimeline.slice(windowStart, Math.min(fullTimeline.length, windowStart + VIRTUAL_WINDOW_SIZE)),
+    [fullTimeline, windowStart]
+  );
+  const dateOptions = useMemo(() => buildDateOptions(fullTimeline), [fullTimeline]);
   const participantMap = useMemo(
     () => new Map(session?.participants.map((participant) => [participant.id, participant]) ?? []),
     [session]
   );
   const rowVirtualizer = useVirtualizer({
-    count: timeline.length,
+    count: visibleTimeline.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => (timeline[index]?.type === "date" ? 42 : estimatedRowSize),
+    estimateSize: (index) => estimateTimelineItemHeight(visibleTimeline[index]),
     overscan: 16
   });
   const currentDateOption = getDateOptionForTimelineIndex(
     dateOptions,
-    activeDateIndex ?? Math.max(0, timeline.length - 1)
+    activeDateIndex ?? Math.max(0, fullTimeline.length - 1)
   );
 
   useEffect(() => {
     let active = true;
     setLoadingSession(true);
     didScrollToLatestRef.current = false;
+    autoScrollingToLatestRef.current = false;
 
     loadSession(sessionId).then((nextSession) => {
       if (!active) {
@@ -60,7 +72,19 @@ export function ViewerPage() {
   }, [sessionId]);
 
   useEffect(() => {
-    if (timeline.length === 0 || didScrollToLatestRef.current) {
+    if (fullTimeline.length === 0) {
+      return;
+    }
+
+    const latestIndex = fullTimeline.length - 1;
+    setWindowStart(getWindowStartForLatestIndex(latestIndex, fullTimeline.length));
+    setActiveDateIndex(latestIndex);
+  }, [fullTimeline.length]);
+
+  useEffect(() => {
+    const latestWindowStart = getWindowStartForLatestIndex(fullTimeline.length - 1, fullTimeline.length);
+
+    if (visibleTimeline.length === 0 || didScrollToLatestRef.current || windowStart !== latestWindowStart) {
       return undefined;
     }
 
@@ -69,15 +93,21 @@ export function ViewerPage() {
 
     const scrollToLatest = () => {
       const scrollElement = parentRef.current;
-      rowVirtualizer.scrollToIndex(timeline.length - 1, { align: "end" });
+      autoScrollingToLatestRef.current = true;
+      rowVirtualizer.scrollToIndex(visibleTimeline.length - 1, { align: "end" });
 
       if (scrollElement) {
-          const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+        const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
 
         if (maxScrollTop > 0 || attempts >= 10) {
           scrollElement.scrollTop = maxScrollTop;
-          setActiveDateIndex(getDateOptionForTimelineIndex(dateOptions, timeline.length - 1)?.index ?? timeline.length - 1);
+          setActiveDateIndex(fullTimeline.length - 1);
           didScrollToLatestRef.current = true;
+          window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+              autoScrollingToLatestRef.current = false;
+            });
+          });
           return;
         }
       }
@@ -91,20 +121,108 @@ export function ViewerPage() {
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [dateOptions, rowVirtualizer, timeline.length]);
+  }, [fullTimeline.length, rowVirtualizer, visibleTimeline.length, windowStart]);
+
+  useEffect(() => {
+    const pendingIndex = pendingScrollIndexRef.current;
+
+    if (pendingIndex === null || visibleTimeline.length === 0) {
+      return;
+    }
+
+    const localIndex = clamp(pendingIndex - windowStart, 0, visibleTimeline.length - 1);
+    rowVirtualizer.scrollToIndex(localIndex, { align: "start" });
+    pendingScrollIndexRef.current = null;
+  }, [rowVirtualizer, visibleTimeline.length, windowStart]);
+
+  useLayoutEffect(() => {
+    const pendingScrollTop = pendingScrollTopRef.current;
+
+    if (pendingScrollTop === null) {
+      return;
+    }
+
+    pendingScrollTopRef.current = null;
+
+    window.requestAnimationFrame(() => {
+      const scrollElement = parentRef.current;
+
+      if (scrollElement) {
+        scrollElement.scrollTop = clamp(
+          pendingScrollTop,
+          0,
+          Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight)
+        );
+      }
+
+      shiftingWindowRef.current = false;
+      scheduleActiveDateUpdate();
+    });
+  }, [windowStart]);
+
+  function handleMessageListScroll(event: UIEvent<HTMLDivElement>) {
+    shiftVirtualWindowIfNeeded(event.currentTarget);
+    scheduleActiveDateUpdate();
+  }
+
+  function shiftVirtualWindowIfNeeded(scrollElement: HTMLDivElement) {
+    if (shiftingWindowRef.current || fullTimeline.length <= VIRTUAL_WINDOW_SIZE) {
+      return;
+    }
+
+    // Keep the browser scroll surface below precision limits for million-row exports.
+    const maxWindowStart = Math.max(0, fullTimeline.length - VIRTUAL_WINDOW_SIZE);
+    const bottomDistance = scrollElement.scrollHeight - scrollElement.clientHeight - scrollElement.scrollTop;
+
+    if (scrollElement.scrollTop < VIRTUAL_WINDOW_EDGE_PX && windowStart > 0) {
+      const nextWindowStart = Math.max(0, windowStart - VIRTUAL_WINDOW_SHIFT_SIZE);
+      const addedHeight = estimateTimelineRangeHeight(fullTimeline, nextWindowStart, windowStart);
+
+      shiftingWindowRef.current = true;
+      pendingScrollTopRef.current = scrollElement.scrollTop + addedHeight;
+      setWindowStart(nextWindowStart);
+      return;
+    }
+
+    if (bottomDistance < VIRTUAL_WINDOW_EDGE_PX && windowStart < maxWindowStart) {
+      const nextWindowStart = Math.min(maxWindowStart, windowStart + VIRTUAL_WINDOW_SHIFT_SIZE);
+      const removedHeight = estimateTimelineRangeHeight(fullTimeline, windowStart, nextWindowStart);
+
+      shiftingWindowRef.current = true;
+      pendingScrollTopRef.current = scrollElement.scrollTop - removedHeight;
+      setWindowStart(nextWindowStart);
+    }
+  }
 
   function scheduleActiveDateUpdate() {
-    if (activeDateFrameRef.current) {
+    if (activeDateFrameRef.current || autoScrollingToLatestRef.current) {
       return;
     }
 
     activeDateFrameRef.current = window.requestAnimationFrame(() => {
       activeDateFrameRef.current = 0;
+
+      if (autoScrollingToLatestRef.current) {
+        return;
+      }
+
+      const scrollElement = parentRef.current;
+
+      if (scrollElement) {
+        const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+
+        if (maxScrollTop > 0 && scrollElement.scrollTop >= maxScrollTop - 2) {
+          setActiveDateIndex(fullTimeline.length - 1);
+          return;
+        }
+      }
+
       const nextTimelineIndex = getVisibleBottomTimelineIndex(
         rowVirtualizer.getVirtualItems(),
-        Math.max(0, timeline.length - 1)
+        Math.max(0, visibleTimeline.length - 1)
       );
-      const nextDateIndex = getDateOptionForTimelineIndex(dateOptions, nextTimelineIndex)?.index ?? nextTimelineIndex;
+      const nextGlobalIndex = windowStart + nextTimelineIndex;
+      const nextDateIndex = getDateOptionForTimelineIndex(dateOptions, nextGlobalIndex)?.index ?? nextGlobalIndex;
 
       setActiveDateIndex((currentDateIndex) => (currentDateIndex === nextDateIndex ? currentDateIndex : nextDateIndex));
     });
@@ -170,7 +288,9 @@ export function ViewerPage() {
             const index = Number(event.target.value);
 
             if (Number.isFinite(index)) {
-              rowVirtualizer.scrollToIndex(index, { align: "start" });
+              pendingScrollIndexRef.current = index;
+              setWindowStart(getWindowStartForDateIndex(index, fullTimeline.length));
+              setActiveDateIndex(index);
             }
           }}
         >
@@ -185,7 +305,7 @@ export function ViewerPage() {
       <div
         className="message-list"
         data-testid="message-list"
-        onScroll={scheduleActiveDateUpdate}
+        onScroll={handleMessageListScroll}
         ref={parentRef}
       >
         <div
@@ -195,7 +315,7 @@ export function ViewerPage() {
           }}
         >
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-            const item = timeline[virtualRow.index];
+            const item = visibleTimeline[virtualRow.index];
 
             return (
               <div
@@ -408,10 +528,54 @@ function getMinuteKey(timestampMs: number): number {
   return Math.floor(timestampMs / 60_000);
 }
 
-function getEstimatedRowSize(timelineLength: number): number {
-  if (timelineLength <= 0) {
+function getWindowStartForLatestIndex(index: number, timelineLength: number): number {
+  return clamp(index - VIRTUAL_WINDOW_SIZE + 1, 0, Math.max(0, timelineLength - VIRTUAL_WINDOW_SIZE));
+}
+
+function getWindowStartForDateIndex(index: number, timelineLength: number): number {
+  return clamp(index, 0, Math.max(0, timelineLength - VIRTUAL_WINDOW_SIZE));
+}
+
+function estimateTimelineRangeHeight(timeline: TimelineItem[], start: number, end: number): number {
+  let height = 0;
+
+  for (let index = start; index < end; index += 1) {
+    height += estimateTimelineItemHeight(timeline[index]);
+  }
+
+  return height;
+}
+
+function estimateTimelineItemHeight(item: TimelineItem | undefined): number {
+  if (!item) {
     return 78;
   }
 
-  return Math.min(78, Math.max(40, Math.floor(MAX_ESTIMATED_SCROLL_HEIGHT / timelineLength)));
+  if (item.type === "date") {
+    return 42;
+  }
+
+  const senderNameHeight = 18;
+  const bubbleGaps = Math.max(0, item.messages.length - 1) * 3;
+  const bubbleHeight = item.messages.reduce((height, message) => height + estimateBubbleHeight(message), 0);
+
+  return Math.max(52, senderNameHeight + bubbleHeight + bubbleGaps) + 8;
+}
+
+function estimateBubbleHeight(message: ChatMessage): number {
+  const text = message.text.trim();
+
+  if (message.kind !== "text" || text.length === 0) {
+    return 40;
+  }
+
+  const lines = text
+    .split(/\r?\n/u)
+    .reduce((count, line) => count + Math.max(1, Math.ceil(Array.from(line).length / 22)), 0);
+
+  return 18 + lines * 22;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
