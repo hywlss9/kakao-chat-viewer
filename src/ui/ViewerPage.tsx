@@ -9,20 +9,22 @@ import { AvatarView } from "./AvatarView";
 
 type TimelineItem =
   | { type: "date"; id: string; timestampMs: number }
-  | { type: "message"; id: string; message: ChatMessage };
+  | { type: "cluster"; id: string; participantId: string; timestampMs: number; messages: ChatMessage[] };
+
+const MAX_ESTIMATED_SCROLL_HEIGHT = 28_000_000;
 
 export function ViewerPage() {
   const { sessionId = "" } = useParams();
   const navigate = useNavigate();
   const [session, setSession] = useState<ChatSession | null>(null);
   const [loadingSession, setLoadingSession] = useState(true);
-  const [viewport, setViewport] = useState({ height: 0, scrollTop: Number.MAX_SAFE_INTEGER });
+  const [activeDateIndex, setActiveDateIndex] = useState<number | null>(null);
   const parentRef = useRef<HTMLDivElement | null>(null);
   const didScrollToLatestRef = useRef(false);
-  const viewportFrameRef = useRef(0);
-  const pendingViewportRef = useRef(viewport);
+  const activeDateFrameRef = useRef(0);
   const timeline = useMemo(() => (session ? buildTimeline(session.messages) : []), [session]);
   const dateOptions = useMemo(() => buildDateOptions(timeline), [timeline]);
+  const estimatedRowSize = useMemo(() => getEstimatedRowSize(timeline.length), [timeline.length]);
   const participantMap = useMemo(
     () => new Map(session?.participants.map((participant) => [participant.id, participant]) ?? []),
     [session]
@@ -30,16 +32,13 @@ export function ViewerPage() {
   const rowVirtualizer = useVirtualizer({
     count: timeline.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => (timeline[index]?.type === "date" ? 42 : 78),
+    estimateSize: (index) => (timeline[index]?.type === "date" ? 42 : estimatedRowSize),
     overscan: 16
   });
-  const virtualItems = rowVirtualizer.getVirtualItems();
-  const currentTimelineIndex = getCurrentTimelineIndex(
-    virtualItems,
-    viewport.scrollTop + viewport.height,
-    Math.max(0, timeline.length - 1)
+  const currentDateOption = getDateOptionForTimelineIndex(
+    dateOptions,
+    activeDateIndex ?? Math.max(0, timeline.length - 1)
   );
-  const currentDateOption = getDateOptionForTimelineIndex(dateOptions, currentTimelineIndex);
 
   useEffect(() => {
     let active = true;
@@ -73,11 +72,11 @@ export function ViewerPage() {
       rowVirtualizer.scrollToIndex(timeline.length - 1, { align: "end" });
 
       if (scrollElement) {
-        const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+          const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
 
         if (maxScrollTop > 0 || attempts >= 10) {
           scrollElement.scrollTop = maxScrollTop;
-          updateViewportSnapshot(maxScrollTop, scrollElement.clientHeight);
+          setActiveDateIndex(getDateOptionForTimelineIndex(dateOptions, timeline.length - 1)?.index ?? timeline.length - 1);
           didScrollToLatestRef.current = true;
           return;
         }
@@ -92,33 +91,29 @@ export function ViewerPage() {
     return () => {
       window.cancelAnimationFrame(frameId);
     };
-  }, [rowVirtualizer, timeline.length]);
+  }, [dateOptions, rowVirtualizer, timeline.length]);
 
-  function updateViewportSnapshot(scrollTop: number, height: number) {
-    pendingViewportRef.current = { height, scrollTop };
-
-    if (viewportFrameRef.current) {
+  function scheduleActiveDateUpdate() {
+    if (activeDateFrameRef.current) {
       return;
     }
 
-    viewportFrameRef.current = window.requestAnimationFrame(() => {
-      viewportFrameRef.current = 0;
-      setViewport((currentViewport) => {
-        const nextViewport = pendingViewportRef.current;
+    activeDateFrameRef.current = window.requestAnimationFrame(() => {
+      activeDateFrameRef.current = 0;
+      const nextTimelineIndex = getVisibleBottomTimelineIndex(
+        rowVirtualizer.getVirtualItems(),
+        Math.max(0, timeline.length - 1)
+      );
+      const nextDateIndex = getDateOptionForTimelineIndex(dateOptions, nextTimelineIndex)?.index ?? nextTimelineIndex;
 
-        if (currentViewport.scrollTop === nextViewport.scrollTop && currentViewport.height === nextViewport.height) {
-          return currentViewport;
-        }
-
-        return nextViewport;
-      });
+      setActiveDateIndex((currentDateIndex) => (currentDateIndex === nextDateIndex ? currentDateIndex : nextDateIndex));
     });
   }
 
   useEffect(() => {
     return () => {
-      if (viewportFrameRef.current) {
-        window.cancelAnimationFrame(viewportFrameRef.current);
+      if (activeDateFrameRef.current) {
+        window.cancelAnimationFrame(activeDateFrameRef.current);
       }
     };
   }, []);
@@ -190,9 +185,7 @@ export function ViewerPage() {
       <div
         className="message-list"
         data-testid="message-list"
-        onScroll={(event) => {
-          updateViewportSnapshot(event.currentTarget.scrollTop, event.currentTarget.clientHeight);
-        }}
+        onScroll={scheduleActiveDateUpdate}
         ref={parentRef}
       >
         <div
@@ -203,11 +196,10 @@ export function ViewerPage() {
         >
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
             const item = timeline[virtualRow.index];
-            const compactRow = hasClusterFollower(timeline, virtualRow.index);
 
             return (
               <div
-                className={compactRow ? "virtual-row virtual-row-compact" : "virtual-row"}
+                className="virtual-row"
                 data-index={virtualRow.index}
                 key={item.id}
                 ref={rowVirtualizer.measureElement}
@@ -216,12 +208,9 @@ export function ViewerPage() {
                 {item.type === "date" ? (
                   <div className="date-divider">{formatDateLabel(item.timestampMs)}</div>
                 ) : (
-                  <MessageRow
-                    message={item.message}
-                    profile={participantMap.get(item.message.participantId)}
-                    showSenderMeta={shouldShowSenderMeta(timeline, virtualRow.index)}
-                    isClusterContinuation={isClusterContinuation(timeline, virtualRow.index)}
-                    showTime={shouldShowMessageTime(timeline, virtualRow.index)}
+                  <MessageCluster
+                    messages={item.messages}
+                    profile={participantMap.get(item.participantId)}
                   />
                 )}
               </div>
@@ -233,61 +222,57 @@ export function ViewerPage() {
   );
 }
 
-function MessageRow({
-  message,
-  profile,
-  showSenderMeta,
-  isClusterContinuation,
-  showTime
+function MessageCluster({
+  messages,
+  profile
 }: {
-  message: ChatMessage;
+  messages: ChatMessage[];
   profile?: ParticipantProfile;
-  showSenderMeta: boolean;
-  isClusterContinuation: boolean;
-  showTime: boolean;
 }) {
   if (!profile) {
     return null;
   }
 
-  if (message.kind === "system") {
-    return <div className="system-message">{message.text}</div>;
+  if (messages.length === 1 && messages[0].kind === "system") {
+    return <div className="system-message">{messages[0].text}</div>;
   }
 
   const isMe = profile.isMe;
-  const rowClassName = [
-    "message-row",
-    isMe ? "message-row-me" : "",
-    isClusterContinuation ? "message-row-compact" : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const lastMessage = messages[messages.length - 1];
 
   return (
-    <article className={rowClassName}>
-      {!isMe && showSenderMeta ? <AvatarView profile={profile} size="sm" /> : null}
-      {!isMe && !showSenderMeta ? <span className="avatar-spacer" aria-hidden="true" /> : null}
+    <article className={isMe ? "message-row message-row-me" : "message-row"}>
+      {!isMe ? <AvatarView profile={profile} size="sm" /> : null}
       <div className="message-stack">
-        {!isMe && showSenderMeta ? (
+        {!isMe ? (
           <span className="sender-name" data-testid="sender-name">
             {profile.displayName}
           </span>
         ) : null}
-        <div className={isMe ? "message-line message-line-me" : "message-line"}>
-          {isMe && showTime ? (
-            <time className="message-time" data-testid="message-time">
-              {formatTimeLabel(message.timestampMs)}
-            </time>
-          ) : null}
-          <div className={isMe ? "bubble bubble-me" : "bubble"}>
-            <SpecialMessageContent message={message} />
-          </div>
-          {!isMe && showTime ? (
-            <time className="message-time" data-testid="message-time">
-              {formatTimeLabel(message.timestampMs)}
-            </time>
-          ) : null}
-        </div>
+        {messages.map((message) => {
+          const showTime = message.id === lastMessage.id;
+
+          return (
+            <div
+              className={isMe ? "message-line message-line-me" : "message-line"}
+              key={message.id}
+            >
+              {isMe && showTime ? (
+                <time className="message-time" data-testid="message-time">
+                  {formatTimeLabel(message.timestampMs)}
+                </time>
+              ) : null}
+              <div className={isMe ? "bubble bubble-me" : "bubble"}>
+                <SpecialMessageContent message={message} />
+              </div>
+              {!isMe && showTime ? (
+                <time className="message-time" data-testid="message-time">
+                  {formatTimeLabel(message.timestampMs)}
+                </time>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     </article>
   );
@@ -340,11 +325,13 @@ function SpecialMessageContent({ message }: { message: ChatMessage }) {
 function buildTimeline(messages: ChatMessage[]): TimelineItem[] {
   const timeline: TimelineItem[] = [];
   let lastDateKey = "";
+  let currentCluster: Extract<TimelineItem, { type: "cluster" }> | null = null;
 
   for (const message of messages) {
     const dateKey = getDateKey(message.timestampMs);
 
     if (dateKey !== lastDateKey) {
+      currentCluster = null;
       timeline.push({
         type: "date",
         id: `date-${dateKey}`,
@@ -353,11 +340,18 @@ function buildTimeline(messages: ChatMessage[]): TimelineItem[] {
       lastDateKey = dateKey;
     }
 
-    timeline.push({
-      type: "message",
-      id: message.id,
-      message
-    });
+    if (currentCluster && isSameMessageCluster(currentCluster.messages[currentCluster.messages.length - 1], message)) {
+      currentCluster.messages.push(message);
+    } else {
+      currentCluster = {
+        type: "cluster",
+        id: `cluster-${message.id}`,
+        participantId: message.participantId,
+        timestampMs: message.timestampMs,
+        messages: [message]
+      };
+      timeline.push(currentCluster);
+    }
   }
 
   return timeline;
@@ -379,12 +373,8 @@ function buildDateOptions(timeline: TimelineItem[]): Array<{ dateKey: string; la
   });
 }
 
-function getCurrentTimelineIndex(
-  virtualItems: Array<{ end: number; index: number }>,
-  scrollOffset: number,
-  fallbackIndex: number
-): number {
-  return virtualItems.find((item) => item.end >= scrollOffset + 1)?.index ?? fallbackIndex;
+function getVisibleBottomTimelineIndex(virtualItems: Array<{ index: number }>, fallbackIndex: number): number {
+  return virtualItems[virtualItems.length - 1]?.index ?? fallbackIndex;
 }
 
 function getDateOptionForTimelineIndex(
@@ -402,46 +392,6 @@ function getDateOptionForTimelineIndex(
   return dateOptions[0];
 }
 
-function shouldShowSenderMeta(timeline: TimelineItem[], index: number): boolean {
-  const currentMessage = getTimelineMessage(timeline[index]);
-  const previousMessage = getTimelineMessage(timeline[index - 1]);
-
-  if (!currentMessage || currentMessage.kind === "system") {
-    return false;
-  }
-
-  return !isSameMessageCluster(previousMessage, currentMessage);
-}
-
-function isClusterContinuation(timeline: TimelineItem[], index: number): boolean {
-  const currentMessage = getTimelineMessage(timeline[index]);
-  const previousMessage = getTimelineMessage(timeline[index - 1]);
-
-  return isSameMessageCluster(previousMessage, currentMessage);
-}
-
-function hasClusterFollower(timeline: TimelineItem[], index: number): boolean {
-  const currentMessage = getTimelineMessage(timeline[index]);
-  const nextMessage = getTimelineMessage(timeline[index + 1]);
-
-  return isSameMessageCluster(currentMessage, nextMessage);
-}
-
-function shouldShowMessageTime(timeline: TimelineItem[], index: number): boolean {
-  const currentMessage = getTimelineMessage(timeline[index]);
-  const nextMessage = getTimelineMessage(timeline[index + 1]);
-
-  if (!currentMessage || currentMessage.kind === "system") {
-    return false;
-  }
-
-  return !isSameMessageCluster(currentMessage, nextMessage);
-}
-
-function getTimelineMessage(item: TimelineItem | undefined): ChatMessage | null {
-  return item?.type === "message" ? item.message : null;
-}
-
 function isSameMessageCluster(left: ChatMessage | null, right: ChatMessage | null): boolean {
   if (!left || !right) {
     return false;
@@ -456,4 +406,12 @@ function isSameMessageCluster(left: ChatMessage | null, right: ChatMessage | nul
 
 function getMinuteKey(timestampMs: number): number {
   return Math.floor(timestampMs / 60_000);
+}
+
+function getEstimatedRowSize(timelineLength: number): number {
+  if (timelineLength <= 0) {
+    return 78;
+  }
+
+  return Math.min(78, Math.max(40, Math.floor(MAX_ESTIMATED_SCROLL_HEIGHT / timelineLength)));
 }

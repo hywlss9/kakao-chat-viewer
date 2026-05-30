@@ -1,65 +1,93 @@
 import Papa from "papaparse";
-import type { ChatMessage, ChatSession, ParseResult, RawChatRow } from "./chatTypes";
+import type { ChatMessage, ChatSession, ParseResult, ParticipantProfile, RawChatRow } from "./chatTypes";
 import { parseCsvDateTime, toTimestampFromKoreanParts } from "./date";
 import { classifyMessage, shouldHideRow } from "./messageClassifier";
-import { createParticipantProfile, stableParticipantId } from "./profiles";
+import { createParticipantProfile } from "./profiles";
 
-const MAX_RAW_ROWS = 200_000;
+export const MAX_RAW_ROWS = 2_000_000;
+
+export interface ChatSessionBuildState {
+  messages: ChatMessage[];
+  participantByName: Map<string, string>;
+  participants: ParticipantProfile[];
+  rawRows: number;
+  skippedRows: number;
+  warnings: string[];
+}
 
 export function parseChatExport(text: string, fileName = "chat-export"): ParseResult {
   const warnings: string[] = [];
   const rawRows = looksLikeCsv(text, fileName) ? parseCsvRows(text, warnings) : parseTxtRows(text, warnings);
+  const buildState = createChatSessionBuildState(warnings);
 
-  if (rawRows.length > MAX_RAW_ROWS) {
-    throw new Error("대화가 너무 큽니다. 최대 200,000행까지 지원합니다.");
+  for (const row of rawRows) {
+    addRawRowToChatSessionBuildState(buildState, row);
   }
 
-  const participants = Array.from(new Set(rawRows.map((row) => row.user.trim()).filter(Boolean))).map(
-    createParticipantProfile
-  );
-  const participantIds = new Set(participants.map((participant) => participant.id));
-  let skippedRows = 0;
+  return finalizeChatSessionBuildState(buildState, fileName);
+}
 
-  const messages: ChatMessage[] = rawRows.flatMap((row) => {
-    if (shouldHideRow(row.user, row.message)) {
-      skippedRows += 1;
-      return [];
-    }
+export function createChatSessionBuildState(warnings: string[] = []): ChatSessionBuildState {
+  return {
+    messages: [],
+    participantByName: new Map(),
+    participants: [],
+    rawRows: 0,
+    skippedRows: 0,
+    warnings
+  };
+}
 
-    const participantId = stableParticipantId(row.user.trim());
-    const timestampMs = parseCsvDateTime(row.dateText);
+export function addRawRowToChatSessionBuildState(state: ChatSessionBuildState, row: RawChatRow): void {
+  state.rawRows += 1;
 
-    if (!participantIds.has(participantId)) {
-      warnings.push(`${row.sourceIndex}행의 사용자 정보를 해석하지 못했습니다.`);
-      skippedRows += 1;
-      return [];
-    }
+  if (state.rawRows > MAX_RAW_ROWS) {
+    throw new Error(`대화가 너무 큽니다. 최대 ${MAX_RAW_ROWS.toLocaleString("en-US")}행까지 지원합니다.`);
+  }
 
-    if (timestampMs === null) {
-      warnings.push(`${row.sourceIndex}행의 날짜를 해석하지 못했습니다: ${row.dateText}`);
-      skippedRows += 1;
-      return [];
-    }
+  if (shouldHideRow(row.user, row.message)) {
+    state.skippedRows += 1;
+    return;
+  }
 
-    return [
-      {
-        id: `message-${row.sourceIndex}`,
-        participantId,
-        kind: classifyMessage(row.message),
-        text: row.message.trim(),
-        timestampMs,
-        sourceIndex: row.sourceIndex
-      }
-    ];
+  const userName = row.user.trim();
+  const timestampMs = parseCsvDateTime(row.dateText);
+
+  if (timestampMs === null) {
+    state.warnings.push(`${row.sourceIndex}행의 날짜를 해석하지 못했습니다: ${row.dateText}`);
+    state.skippedRows += 1;
+    return;
+  }
+
+  let participantId = state.participantByName.get(userName);
+
+  if (!participantId) {
+    const profile = createParticipantProfile(userName, state.participants.length);
+    state.participants.push(profile);
+    state.participantByName.set(userName, profile.id);
+    participantId = profile.id;
+  }
+
+  state.messages.push({
+    id: `message-${row.sourceIndex}`,
+    participantId,
+    kind: classifyMessage(row.message),
+    text: row.message.trim(),
+    timestampMs,
+    sourceIndex: row.sourceIndex
   });
+}
+
+export function finalizeChatSessionBuildState(state: ChatSessionBuildState, fileName: string): ParseResult {
+  const warnings = state.warnings;
 
   const session: ChatSession = {
     id: createSessionId(),
-    roomName: deriveRoomName(fileName, participants.map((participant) => participant.displayName)),
-    participants,
-    messages,
+    roomName: deriveRoomName(fileName, state.participants.map((participant) => participant.displayName)),
+    participants: state.participants,
+    messages: state.messages,
     warnings,
-    skippedRows,
+    skippedRows: state.skippedRows,
     createdAt: new Date().toISOString(),
     sourceFileName: fileName
   };

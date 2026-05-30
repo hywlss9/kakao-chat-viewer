@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import type { ChatSession, ParticipantProfile } from "../domain/chatTypes";
 import { DEFAULT_PROFILE_COLORS } from "../domain/profiles";
 import { validateAvatarImageFile } from "../security/fileValidation";
-import { parseFileInWorker } from "../services/parseClient";
+import { parseFileInWorker, type ParseProgress } from "../services/parseClient";
 import {
   clearAllLocalChatData,
   createThumbnailBlob,
@@ -17,6 +17,8 @@ export function UploadPage() {
   const navigate = useNavigate();
   const [draftSession, setDraftSession] = useState<ChatSession | null>(null);
   const [status, setStatus] = useState<"idle" | "parsing" | "ready" | "saving">("idle");
+  const [parseProgress, setParseProgress] = useState<ParseProgress | null>(null);
+  const [activeFileName, setActiveFileName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -31,14 +33,18 @@ export function UploadPage() {
 
   async function handleFile(file: File) {
     setError(null);
+    setActiveFileName(file.name);
+    setParseProgress(null);
     setStatus("parsing");
 
     try {
-      const result = await parseFileInWorker(file);
+      const result = await parseFileInWorker(file, setParseProgress);
       setDraftSession(result.session);
+      setParseProgress(null);
       setStatus("ready");
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "파일을 해석하지 못했습니다.");
+      setParseProgress(null);
       setStatus("idle");
     }
   }
@@ -91,6 +97,8 @@ export function UploadPage() {
     await clearAllLocalChatData();
     setDraftSession(null);
     setError(null);
+    setActiveFileName("");
+    setParseProgress(null);
     setStatus("idle");
   }
 
@@ -121,9 +129,15 @@ export function UploadPage() {
 
       {!draftSession ? (
         <section className="upload-panel">
-          <FileUp aria-hidden="true" size={40} />
-          <h2>TXT 또는 CSV 파일을 선택하세요</h2>
-          <p>파일은 서버로 전송되지 않고 이 브라우저 안에서만 해석됩니다. 임시 데이터는 12시간 뒤 만료됩니다.</p>
+          {status === "parsing" ? (
+            <LoadingPanel fileName={activeFileName} progress={parseProgress} />
+          ) : (
+            <>
+              <FileUp aria-hidden="true" size={40} />
+              <h2>TXT 또는 CSV 파일을 선택하세요</h2>
+              <p>파일은 서버로 전송되지 않고 이 브라우저 안에서만 해석됩니다. 임시 데이터는 12시간 뒤 만료됩니다.</p>
+            </>
+          )}
           <input
             ref={fileInputRef}
             className="visually-hidden"
@@ -229,8 +243,15 @@ export function UploadPage() {
 
           <footer className="bottom-action">
             {error ? <p className="bottom-error">{error}</p> : null}
-            <button className="primary-button" type="button" disabled={!canComplete} onClick={() => void completeSetup()}>
-              <Check size={18} /> 완료
+            {status === "saving" ? <SavingPanel /> : null}
+            <button
+              className="primary-button"
+              type="button"
+              disabled={!canComplete || status === "saving"}
+              onClick={() => void completeSetup()}
+            >
+              {status === "saving" ? <Loader2 className="spin" size={18} /> : <Check size={18} />}
+              {status === "saving" ? "저장 중" : "완료"}
             </button>
             <button className="ghost-button compact" type="button" onClick={() => void clearLocalData()}>
               <Trash2 size={15} /> 로컬 데이터 삭제
@@ -240,4 +261,44 @@ export function UploadPage() {
       )}
     </div>
   );
+}
+
+function LoadingPanel({ fileName, progress }: { fileName: string; progress: ParseProgress | null }) {
+  const isReading = progress?.stage === "reading";
+  const percent = isReading ? progress.percent : null;
+
+  return (
+    <div className="loading-panel" aria-live="polite" role="status">
+      <Loader2 className="spin" size={42} />
+      <h2>{isReading ? "파일을 읽는 중입니다" : "대화 내용을 분석 중입니다"}</h2>
+      <p>{fileName ? `${fileName} 파일을 브라우저 안에서 처리하고 있습니다.` : "잠시만 기다려주세요."}</p>
+      <div className="progress-track" aria-label="파일 처리 진행률">
+        <span className="progress-bar" style={{ width: `${percent ?? 100}%` }} />
+      </div>
+      <span className="progress-label">
+        {isReading ? `${percent}% · ${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}` : "대화 형식을 정리하고 있습니다"}
+      </span>
+    </div>
+  );
+}
+
+function SavingPanel() {
+  return (
+    <div className="saving-panel" aria-live="polite" role="status">
+      <Loader2 className="spin" size={16} />
+      대화 내용을 현재 브라우저에 저장하는 중입니다.
+    </div>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  }
+
+  if (bytes >= 1024) {
+    return `${(bytes / 1024).toFixed(1)}KB`;
+  }
+
+  return `${bytes}B`;
 }

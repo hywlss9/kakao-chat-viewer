@@ -121,6 +121,43 @@ a {
   line-height: 1.55;
 }
 
+.loading-panel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.loading-panel h2 {
+  margin: 0;
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.progress-track {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #eaecf0;
+}
+
+.progress-bar {
+  display: block;
+  height: 100%;
+  min-width: 8px;
+  border-radius: inherit;
+  background: #fee500;
+  transition: width 160ms ease;
+}
+
+.progress-label {
+  color: #475467;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .primary-button {
   min-height: 48px;
   width: 100%;
@@ -194,6 +231,21 @@ a {
   font-size: 12px;
   font-weight: 800;
   text-align: center;
+}
+
+.saving-panel {
+  min-height: 34px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  color: #344054;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .spin {
@@ -460,6 +512,8 @@ a {
   left: 0;
   width: 100%;
   padding-bottom: 8px;
+  contain: layout paint style;
+  will-change: transform;
 }
 
 .virtual-row-compact {
@@ -483,6 +537,7 @@ a {
   align-items: flex-start;
   gap: 8px;
   margin: 0;
+  contain: layout paint style;
 }
 
 .message-row-compact {
